@@ -1,76 +1,38 @@
-name: build-test-deploy
-
-on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.25'
-
-      - name: Run tests
-        run: go test ./...
-
-      - name: Build Docker image
-        run: docker build -t go-k8s-demo:ci .
-
-      - name: Create Kind cluster
-        uses: helm/kind-action@v1
-        with:
-          cluster_name: ci-cluster
-
-      - name: Load image into Kind
-        run: kind load docker-image go-k8s-demo:ci --name ci-cluster
-
-      - name: Verify image inside Kind node
-        run: |
-          docker exec ci-cluster-control-plane crictl images | grep go-k8s-demo
-
-      - name: Deploy and diagnose
-        run: |
-          kubectl apply -f k8s/
-
-          if ! kubectl rollout status deployment/go-k8s-demo --timeout=120s; then
-            echo "::group::Pod status"
-            kubectl get pods -o wide
-            echo "::endgroup::"
-
-            echo "::group::Pod events"
-            kubectl describe pods
-            echo "::endgroup::"
-
-            echo "::group::Pod logs"
-            for pod in $(kubectl get pods -o name); do
-              echo "--- $pod ---"
-              kubectl logs "$pod" --tail=50 || true
-            done
-            echo "::endgroup::"
-
-            exit 1
-          fi
-
-      - name: Smoke test
-        run: |
-          kubectl port-forward svc/go-k8s-demo 8080:80 &
-          sleep 5
-          for i in {1..5}; do
-            if curl -sf http://localhost:8080/healthcheck; then
-              echo "Smoke test passed!"
-              exit 0
-            fi
-            echo "Attempt $i failed, retrying..."
-            sleep 2
-          done
-          echo "Smoke test failed after retries."
-          exit 1
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: go-k8s-demo
+  labels:
+    app: go-k8s-demo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: go-k8s-demo
+  template:
+    metadata:
+      labels:
+        app: go-k8s-demo
+    spec:
+      containers:
+        - name: app
+          image: go-k8s-demo:ci
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: APP_VERSION
+              value: "v1"
+          readinessProbe:
+            httpGet:
+              path: /healthcheck
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthcheck
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
